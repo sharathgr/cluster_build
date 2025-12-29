@@ -1,0 +1,3 @@
+collections:
+  - name: netapp.ontap
+  - name: community.general

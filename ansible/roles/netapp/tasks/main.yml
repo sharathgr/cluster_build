@@ -1,0 +1,358 @@
+---
+# Tasks for NetApp ONTAP 9.16.1 REST API
+# All requests use the Ansible `uri` module against the ONTAP REST endpoints referenced in 9.16.1 documentation.
+
+- name: Create snapshot policies (ONTAP 9.16.1)
+  when: snapshot_policies is defined
+  loop: "{{ snapshot_policies }}"
+  loop_control:
+    loop_var: policy
+  uri:
+    url: "https://{{ netapp_host }}/api/storage/snapshot-policies"
+    method: POST
+    user: "{{ netapp_username }}"
+    password: "{{ netapp_password }}"
+    force_basic_auth: yes
+    validate_certs: no
+    headers:
+      Content-Type: "application/json"
+    body:
+      name: "{{ policy.name }}"
+      is_enabled: "{{ policy.enabled | default(true) }}"
+      comment: "{{ policy.comment | default('') }}"
+      rules: "{{ policy.rules | default([]) }}"
+    body_format: json
+  register: snapshot_policy_result
+  ignore_errors: yes
+
+- name: Find volume by name
+  when: volumes is defined
+  loop: "{{ volumes }}"
+  loop_control:
+    loop_var: vol
+  uri:
+    url: "https://{{ netapp_host }}/api/storage/volumes?name={{ vol.volume }}&svm.name={{ vol.vserver }}"
+    method: GET
+    user: "{{ netapp_username }}"
+    password: "{{ netapp_password }}"
+    force_basic_auth: yes
+    validate_certs: no
+    return_content: yes
+  register: found_volume
+  ignore_errors: yes
+
+- name: Rename and modify volume when found
+  when: found_volume is defined and found_volume.results is defined
+  loop: "{{ found_volume.results }}"
+  loop_control:
+    index_var: idx
+  set_fact:
+    vol_record: "{{ (found_volume.results[idx].json.records[0] if (found_volume.results[idx].json.records|length>0) else {}) }}"
+  when: vol_record is defined and vol_record != {}
+
+ - name: Patch volume name and properties (ONTAP 9.16.1)
+  when: vol_record is defined and vol_record != {}
+  uri:
+    url: "https://{{ netapp_host }}/api/storage/volumes/{{ vol_record.uuid }}"
+    method: PATCH
+    user: "{{ netapp_username }}"
+    password: "{{ netapp_password }}"
+    force_basic_auth: yes
+    validate_certs: no
+    headers:
+      Content-Type: "application/json"
+    body:
+      # Only include keys when defined by using Jinja2 `omit` via `default(omit)`
+      name: "{{ vol.new_name | default(omit) }}"
+      size: "{{ vol.size | default(omit) }}"
+      percent_snapshot_space: "{{ vol.percent_snapshot_space | default(omit) }}"
+      snapshot_policy:
+        name: "{{ vol.snapshot_policy | default(omit) }}"
+      is_snapshot_locking_enabled: "{{ vol.snapshot_locking_enabled | default(omit) }}"
+    body_format: json
+  ignore_errors: yes
+
+- name: Modify CIFS services for SVM
+  when: cifs_settings is defined
+  loop: "{{ cifs_settings }}"
+  loop_control:
+    loop_var: cifs
+  uri:
+    url: "https://{{ netapp_host }}/api/protocols/cifs/services?svm.name={{ cifs.vserver }}"
+    method: GET
+    user: "{{ netapp_username }}"
+    password: "{{ netapp_password }}"
+    force_basic_auth: yes
+    validate_certs: no
+    return_content: yes
+  register: cifs_service
+  ignore_errors: yes
+
+ - name: Patch CIFS service when found (ONTAP 9.16.1)
+  when: cifs_service is defined and cifs_service.json.records | length > 0
+  loop: "{{ range(0, cifs_service.results|length) | list }}"
+  loop_control:
+    loop_var: i
+  uri:
+    url: "https://{{ netapp_host }}/api/protocols/cifs/services/{{ cifs_service.results[i].json.records[0].uuid }}"
+    method: PATCH
+    user: "{{ netapp_username }}"
+    password: "{{ netapp_password }}"
+    force_basic_auth: yes
+    validate_certs: no
+    headers:
+      Content-Type: "application/json"
+    body:
+      advertised_encryption_types: "{{ cifs.advertised_enc_types | default(omit) }}"
+      lm_compatibility_level: "{{ cifs.lm_compatibility_level | default(omit) }}"
+      is_signing_required: "{{ cifs.is_signing_required | default(omit) }}"
+      client_session_timeout: "{{ cifs.client_session_timeout | default(omit) }}"
+    body_format: json
+  ignore_errors: yes
+
+- name: Modify NFS services for SVM
+  when: nfs_settings is defined
+  loop: "{{ nfs_settings }}"
+  loop_control:
+    loop_var: nfs
+  uri:
+    url: "https://{{ netapp_host }}/api/protocols/nfs/services?svm.name={{ nfs.vserver }}"
+    method: GET
+    user: "{{ netapp_username }}"
+    password: "{{ netapp_password }}"
+    force_basic_auth: yes
+    validate_certs: no
+    return_content: yes
+  register: nfs_service
+  ignore_errors: yes
+
+ - name: Patch NFS service when found (ONTAP 9.16.1)
+  when: nfs_service is defined and nfs_service.json.records | length > 0
+  uri:
+    url: "https://{{ netapp_host }}/api/protocols/nfs/services/{{ nfs_service.json.records[0].uuid }}"
+    method: PATCH
+    user: "{{ netapp_username }}"
+    password: "{{ netapp_password }}"
+    force_basic_auth: yes
+    validate_certs: no
+    headers:
+      Content-Type: "application/json"
+    body:
+      idle_connection_timeout: "{{ nfs.idle_connection_timeout | default(omit) }}"
+      access: "{{ nfs.access | default(omit) }}"
+      v4_0: "{{ nfs.v4_0 | default(omit) }}"
+      v4_1: "{{ nfs.v4_1 | default(omit) }}"
+    body_format: json
+  ignore_errors: yes
+
+- name: Ensure export policy modifications
+  when: export_policies is defined
+  loop: "{{ export_policies }}"
+  loop_control:
+    loop_var: ep
+  vars:
+    ep_query: "?svm.name={{ ep.vserver }}&name={{ ep.policyname }}"
+  uri:
+    url: "https://{{ netapp_host }}/api/protocols/nfs/export-policies{{ ep_query }}"
+    method: GET
+    user: "{{ netapp_username }}"
+    password: "{{ netapp_password }}"
+    force_basic_auth: yes
+    validate_certs: no
+    return_content: yes
+  register: export_policy_found
+  ignore_errors: yes
+
+ - name: Patch export policy when found (ONTAP 9.16.1 - rename/rules)
+  when: export_policy_found is defined and export_policy_found.json.records | length > 0
+  uri:
+    url: "https://{{ netapp_host }}/api/protocols/nfs/export-policies/{{ export_policy_found.json.records[0].id }}"
+    method: PATCH
+    user: "{{ netapp_username }}"
+    password: "{{ netapp_password }}"
+    force_basic_auth: yes
+    validate_certs: no
+    headers:
+      Content-Type: "application/json"
+    body:
+      name: "{{ ep.newpolicyname | default(omit) }}"
+      rules: "{{ ep.rules | default(omit) }}"
+    body_format: json
+  ignore_errors: yes
+
+ - name: Create security accounts (AD groups) for specified applications (ONTAP 9.16.1)
+  when: security_accounts is defined
+  loop: "{{ security_accounts }}"
+  loop_control:
+    loop_var: sa
+  vars:
+    apps: "{{ sa.applications | default([]) }}"
+  block:
+    - name: Create account for each application
+      loop: "{{ apps }}"
+      loop_control:
+        loop_var: app
+      uri:
+        url: "https://{{ netapp_host }}/api/security/accounts"
+        method: POST
+        user: "{{ netapp_username }}"
+        password: "{{ netapp_password }}"
+        force_basic_auth: yes
+        validate_certs: no
+        headers:
+          Content-Type: "application/json"
+        body:
+          user_or_group_name: "{{ sa.user_or_group_name }}"
+          application: "{{ app }}"
+          authentication_method: "{{ sa.authentication_method }}"
+          role: "{{ sa.role }}"
+        body_format: json
+      ignore_errors: yes
+
+- name: Manage CIFS local group membership (add)
+  when: cifs_group_members_add is defined
+  loop: "{{ cifs_group_members_add }}"
+  loop_control:
+    loop_var: grp
+  vars:
+    members: "{{ grp.member_names }}"
+  block:
+    - name: POST each member to local-group members
+      loop: "{{ members }}"
+      loop_control:
+        loop_var: member
+      uri:
+        url: "https://{{ netapp_host }}/api/protocols/cifs/local-groups/{{ grp.vserver }}/{{ (grp.group_name | urlencode) }}/members"
+        method: POST
+        user: "{{ netapp_username }}"
+        password: "{{ netapp_password }}"
+        force_basic_auth: yes
+        validate_certs: no
+        headers:
+          Content-Type: "application/json"
+        body:
+          name: "{{ member }}"
+        body_format: json
+      ignore_errors: yes
+
+- name: Manage CIFS local group membership (remove)
+  when: cifs_group_members_remove is defined
+  loop: "{{ cifs_group_members_remove }}"
+  loop_control:
+    loop_var: rem
+  vars:
+    members: "{{ rem.member_names }}"
+  block:
+    - name: DELETE each member from local-group members
+      loop: "{{ members }}"
+      loop_control:
+        loop_var: member
+      uri:
+        url: "https://{{ netapp_host }}/api/protocols/cifs/local-groups/{{ rem.vserver }}/{{ (rem.group_name | urlencode) }}/members/{{ (member | urlencode) }}"
+        method: DELETE
+        user: "{{ netapp_username }}"
+        password: "{{ netapp_password }}"
+        force_basic_auth: yes
+        validate_certs: no
+      ignore_errors: yes
+
+- name: Configure cluster log forwarding destinations
+  when: syslog_destinations is defined
+  loop: "{{ syslog_destinations }}"
+  loop_control:
+    loop_var: dest
+  uri:
+    url: "https://{{ netapp_host }}/api/security/audit/destinations/{{ dest.address }}/{{ dest.port }}"
+    method: PATCH
+    user: "{{ netapp_username }}"
+    password: "{{ netapp_password }}"
+    force_basic_auth: yes
+    validate_certs: no
+    headers:
+      Content-Type: "application/json"
+    body:
+      protocol: "{{ dest.protocol }}"
+      ipspace: "{{ dest.ipspace }}"
+    body_format: json
+  ignore_errors: yes
+
+- name: Create EMS (event) destinations
+  when: ems_destinations is defined
+  loop: "{{ ems_destinations }}"
+  loop_control:
+    loop_var: e
+  uri:
+    url: "https://{{ netapp_host }}/api/support/ems/destinations"
+    method: POST
+    user: "{{ netapp_username }}"
+    password: "{{ netapp_password }}"
+    force_basic_auth: yes
+    validate_certs: no
+    headers:
+      Content-Type: "application/json"
+    body:
+      name: "{{ e.name }}"
+      syslog: "{{ e.syslog }}"
+      syslog_port: "{{ e.syslog_port }}"
+      syslog_transport: "{{ e.syslog_transport }}"
+    body_format: json
+  ignore_errors: yes
+
+- name: Create EMS filters
+  when: ems_filters is defined
+  loop: "{{ ems_filters }}"
+  loop_control:
+    loop_var: f
+  uri:
+    url: "https://{{ netapp_host }}/api/support/ems/filters"
+    method: POST
+    user: "{{ netapp_username }}"
+    password: "{{ netapp_password }}"
+    force_basic_auth: yes
+    validate_certs: no
+    headers:
+      Content-Type: "application/json"
+    body:
+      name: "{{ f.name }}"
+    body_format: json
+  register: ems_filter_created
+  ignore_errors: yes
+
+- name: Patch EMS filter rules
+  when: ems_filters is defined and ems_filter_created is defined
+  loop: "{{ ems_filters }}"
+  loop_control:
+    loop_var: f
+  uri:
+    url: "https://{{ netapp_host }}/api/support/ems/filters/{{ f.name }}"
+    method: PATCH
+    user: "{{ netapp_username }}"
+    password: "{{ netapp_password }}"
+    force_basic_auth: yes
+    validate_certs: no
+    headers:
+      Content-Type: "application/json"
+    body:
+      rules: "{{ f.rules }}"
+    body_format: json
+  ignore_errors: yes
+
+- name: Create EMS notifications (assign destinations to filter)
+  when: ems_notifications is defined
+  loop: "{{ ems_notifications }}"
+  loop_control:
+    loop_var: n
+  uri:
+    url: "https://{{ netapp_host }}/api/support/ems/notifications"
+    method: POST
+    user: "{{ netapp_username }}"
+    password: "{{ netapp_password }}"
+    force_basic_auth: yes
+    validate_certs: no
+    headers:
+      Content-Type: "application/json"
+    body:
+      filter_name: "{{ n.filter_name }}"
+      destinations: "{{ n.destinations }}"
+    body_format: json
+  ignore_errors: yes

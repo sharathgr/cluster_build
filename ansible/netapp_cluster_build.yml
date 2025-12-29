@@ -1,0 +1,14 @@
+- name: NetApp Cluster Build
+  hosts: netapp
+  gather_facts: no
+  vars_files:
+    - group_vars/all.yml
+  pre_tasks:
+    - name: Normalize SVM input from Tower survey or extra-vars
+      set_fact:
+        svm_list: "{{ (svm_names if (svm_names is defined) else ( [svm_name] if (svm_name is defined) else [] )) }}"
+
+  roles:
+    - role: netapp
+      vars:
+        svm_list: "{{ svm_list }}"
